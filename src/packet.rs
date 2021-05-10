@@ -39,6 +39,42 @@ impl BytePacketBuffer {
         self.pos += 1;
         Ok(res)
     }
+    fn read_u16(&mut self) -> Result<u16> {
+        let res = ((self.read()? as u16) << 8) | (self.read()? as u16);
+        Ok(res)
+    }
+    fn read_u32(&mut self) -> Result<u32> {
+        let res = ((self.read()? as u32) << 24)
+            | ((self.read()? as u32) << 16)
+            | ((self.read()? as u32) << 8)
+            | (self.read()? as u32);
+        Ok(res)
+    }
+
+    fn write(&mut self, val: u8) -> Result<()> {
+        if self.pos >= PACKET_BUFFER_SIZE {
+            return Err("End of buffer.".into());
+        }
+        self.buffer[self.pos] = val;
+        self.pos += 1;
+        Ok(())
+    }
+    fn write_u8(&mut self, val: u8) -> Result<()> {
+        self.write(val)?;
+        Ok(())
+    }
+    fn write_u16(&mut self, val: u16) -> Result<()> {
+        self.write((val >> 8) as u8)?;
+        self.write(((val >> 0) & 0xFF) as u8)?;
+        Ok(())
+    }
+    fn write_u32(&mut self, val: u32) -> Result<()> {
+        self.write(((val >> 24) & 0xFF) as u8)?;
+        self.write(((val >> 16) & 0xFF) as u8)?;
+        self.write(((val >> 8) & 0xFF) as u8)?;
+        self.write(((val >> 0) & 0xFF) as u8)?;
+        Ok(())
+    }
 
     fn get(&mut self, pos: usize) -> Result<u8> {
         if pos >= PACKET_BUFFER_SIZE {
@@ -52,19 +88,6 @@ impl BytePacketBuffer {
             return Err("".into());
         }
         Ok(&self.buffer[start..start + len])
-    }
-
-    fn read_u16(&mut self) -> Result<u16> {
-        let res = ((self.read()? as u16) << 8) | (self.read()? as u16);
-        Ok(res)
-    }
-
-    fn read_u32(&mut self) -> Result<u32> {
-        let res = ((self.read()? as u32) << 24)
-            | ((self.read()? as u32) << 16)
-            | ((self.read()? as u32) << 8)
-            | (self.read()? as u32);
-        Ok(res)
     }
 
     fn read_qname(&mut self, outstr: &mut String) -> Result<()> {
@@ -108,6 +131,21 @@ impl BytePacketBuffer {
         if !jumped {
             self.seek(pos)?;
         }
+        Ok(())
+    }
+
+    fn write_qname(&mut self, qname: &str) -> Result<()> {
+        for label in qname.split('.') {
+            let len = label.len();
+            if len > 0x3f {
+                return Err("Single lable exceeds 63 characlets of length".into());
+            }
+            self.write_u8(len as u8)?;
+            for b in label.as_bytes() {
+                self.write_u8(*b)?;
+            }
+        }
+        self.write_u8(0)?;
         Ok(())
     }
 }
@@ -155,19 +193,6 @@ pub struct Header {
     pub answers: u16,
     pub authoritative_entries: u16,
     pub resource_entries: u16,
-    // pub query_responce: bool,
-    // pub operation_code: u8,
-    // pub authoritative_answer: bool,
-    // pub truncated_message: bool,
-    // pub recursion_desired: bool,
-    // pub recursion_available: bool,
-    // pub reserved: u8,
-    // pub rresponce_code: u8,
-
-    // pub question_count: u16,
-    // pub answer_count: u16,
-    // pub authority_count: u16,
-    // pub additonal_count: u16,
 }
 
 impl Header {
@@ -219,6 +244,32 @@ impl Header {
 
         Ok(())
     }
+    fn write(&self, buffer: &mut BytePacketBuffer) -> Result<()> {
+        buffer.write_u16(self.id)?;
+
+        buffer.write_u8(
+            (self.recursion_desired as u8)
+                | ((self.truncated_message as u8) << 1)
+                | ((self.authed_data as u8) << 2)
+                | (self.operation_code << 3)
+                | ((self.responce as u8) << 7) as u8,
+        )?;
+
+        buffer.write_u8(
+            (self.responce_code as u8)
+                | ((self.checking_disabled as u8) << 4)
+                | ((self.authed_data as u8) << 5)
+                | ((self.z as u8) << 6)
+                | ((self.recursion_available as u8) << 7),
+        )?;
+
+        buffer.write_u16(self.questions)?;
+        buffer.write_u16(self.answers)?;
+        buffer.write_u16(self.authoritative_entries)?;
+        buffer.write_u16(self.resource_entries)?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -245,19 +296,26 @@ impl QueryType {
 #[derive(Debug)]
 pub struct Question {
     pub name: String,
-    pub dtype: QueryType,
+    pub qtype: QueryType,
 }
 
 impl Question {
-    pub fn new(name: String, dtype: QueryType) -> Self {
-        Self { name, dtype }
+    pub fn new(name: String, qtype: QueryType) -> Self {
+        Self { name, qtype: qtype }
     }
 
     pub fn read(&mut self, buffer: &mut BytePacketBuffer) -> Result<()> {
         buffer.read_qname(&mut self.name)?;
-        self.dtype = QueryType::from_num(buffer.read_u16()?);
+        self.qtype = QueryType::from_num(buffer.read_u16()?);
         let _ = buffer.read_u16()?; // class
 
+        Ok(())
+    }
+
+    pub fn write(&self, buffer: &mut BytePacketBuffer) -> Result<()> {
+        buffer.write_qname(&self.name)?;
+        buffer.write_u16(self.qtype.to_num())?;
+        buffer.write_u16(1);
         Ok(())
     }
 }
@@ -265,7 +323,7 @@ impl Question {
 pub enum Record {
     UNKNOWN {
         domain: String,
-        dtype: u16,
+        qtype: u16,
         data_len: u16,
         ttl: u32,
     },
@@ -280,12 +338,12 @@ impl Record {
     fn read(buffer: &mut BytePacketBuffer) -> Result<Record> {
         let mut domain = String::new();
         buffer.read_qname(&mut domain)?;
-        let dtype_num = buffer.read_u16()?;
-        let dtype = QueryType::from_num(dtype_num);
+        let qtype_num = buffer.read_u16()?;
+        let qtype = QueryType::from_num(qtype_num);
         let _ = buffer.read_u16()?;
         let ttl = buffer.read_u32()?;
         let data_len = buffer.read_u16()?;
-        match dtype {
+        match qtype {
             QueryType::A => {
                 let raw_addr = buffer.read_u32()?;
                 let addr = Ipv4Addr::new(
@@ -300,19 +358,43 @@ impl Record {
                 buffer.step(data_len as usize)?;
                 Ok(Record::UNKNOWN {
                     domain,
-                    dtype: dtype.to_num(),
+                    qtype: qtype.to_num(),
                     data_len,
                     ttl,
                 })
             }
         }
     }
+    fn write(&self, buffer: &mut BytePacketBuffer) -> Result<usize> {
+        let start_pos = buffer.pos();
+        match *self {
+            Record::A {
+                ref domain,
+                ref addr,
+                ttl,
+            } => {
+                buffer.write_qname(domain)?;
+                buffer.write_u16(QueryType::A.to_num())?;
+                buffer.write_u16(1)?;
+                buffer.write_u32(ttl)?;
+                buffer.write_u16(1)?;
+
+                let octets = addr.octets();
+                buffer.write_u8(octets[0])?;
+                buffer.write_u8(octets[1])?;
+                buffer.write_u8(octets[2])?;
+                buffer.write_u8(octets[3])?;
+            }
+            Record::UNKNOWN { .. } => {}
+        }
+        Ok(buffer.pos() - start_pos)
+    }
 }
 
 pub struct Packet {
     pub header: Header,
-    pub question: Vec<Question>,
-    pub answer: Vec<Record>,
+    pub questions: Vec<Question>,
+    pub answers: Vec<Record>,
     pub authorities: Vec<Record>,
     pub resources: Vec<Record>,
 }
@@ -321,8 +403,8 @@ impl Packet {
     pub fn new() -> Self {
         Self {
             header: Header::new(),
-            question: Vec::new(),
-            answer: Vec::new(),
+            questions: Vec::new(),
+            answers: Vec::new(),
             authorities: Vec::new(),
             resources: Vec::new(),
         }
@@ -334,12 +416,12 @@ impl Packet {
         for _ in 0..result.header.questions {
             let mut question = Question::new("".to_string(), QueryType::UNKNOWN(0));
             question.read(buffer)?;
-            result.question.push(question);
+            result.questions.push(question);
         }
 
         for _ in 0..result.header.answers {
             let record = Record::read(buffer)?;
-            result.answer.push(record);
+            result.answers.push(record);
         }
 
         for _ in 0..result.header.authoritative_entries {
@@ -353,5 +435,29 @@ impl Packet {
         }
 
         Ok(result)
+    }
+
+    pub fn write(&mut self, buffer: &mut BytePacketBuffer) -> Result<()> {
+        self.header.questions = self.questions.len() as u16;
+        self.header.answers = self.answers.len() as u16;
+        self.header.authoritative_entries = self.authorities.len() as u16;
+        self.header.resource_entries = self.resources.len() as u16;
+
+        self.header.write(buffer)?;
+
+        for v in &self.questions {
+            v.write(buffer)?;
+        }
+        for v in &self.answers {
+            v.write(buffer)?;
+        }
+        for v in &self.authorities {
+            v.write(buffer)?;
+        }
+        for v in &self.resources {
+            v.write(buffer)?;
+        }
+
+        Ok(())
     }
 }
