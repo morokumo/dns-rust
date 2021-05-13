@@ -2,7 +2,6 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::{buffer::BytePacketBuffer, enums::QueryType};
 
-
 type Error = Box<dyn std::error::Error>;
 type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]

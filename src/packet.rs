@@ -1,6 +1,9 @@
-use crate::{buffer::BytePacketBuffer, header::Header, question::{DnsRecord, Question}};
 use crate::enums::QueryType;
-
+use crate::{
+    buffer::BytePacketBuffer,
+    header::Header,
+    question::{DnsRecord, Question},
+};
 
 type Error = Box<dyn std::error::Error>;
 type Result<T> = std::result::Result<T, Error>;

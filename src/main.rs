@@ -1,10 +1,10 @@
-use std::{fs::File, io::Read, net::UdpSocket};
+use std::net::UdpSocket;
 
 use crate::{buffer::BytePacketBuffer, enums::QueryType, packet::Packet, question::Question};
-mod packet;
 mod buffer;
-mod header;
 mod enums;
+mod header;
+mod packet;
 mod question;
 
 type Error = Box<dyn std::error::Error>;
@@ -13,35 +13,18 @@ type Result<T> = std::result::Result<T, Error>;
 const PACKET_BUFFER_SIZE: usize = 512;
 
 fn main() -> Result<()> {
-    println!("Hello, world!");
-    let mut f = File::open("response_packet.txt")?;
-    let mut buffer = BytePacketBuffer::new();
-    println!("{:#?}", f);
-    f.read(&mut buffer.buffer)?;
-
-    let packet = Packet::from_buffer(&mut buffer)?;
-    println!("{:#?}", packet.header);
-    for q in packet.questions {
-        println!("{:#?}", q);
+    let socket = UdpSocket::bind(("0.0.0.0", 8053))?;
+    loop {
+        match handle_query(&socket) {
+            Ok(_) => {}
+            Err(e) => eprintln!("ERROR! :{}", e),
+        }
     }
-    for q in packet.answers {
-        println!("{:#?}", q);
-    }
-    for q in packet.authorities {
-        println!("{:#?}", q);
-    }
-    for q in packet.resources {
-        println!("{:#?}", q);
-    }
+}
 
-    println!("<#>-------------------");
-
-    let qname = "yahoo.com";
-    let qtype = QueryType::MX;
-
+fn lookup(qname: &str, qtype: QueryType) -> Result<Packet> {
     let server = ("8.8.8.8", 53);
     let socket = UdpSocket::bind(("0.0.0.0", 43210))?;
-
     let mut packet = Packet::new();
 
     packet.header.id = 6666;
@@ -53,26 +36,56 @@ fn main() -> Result<()> {
 
     let mut req_buffer = BytePacketBuffer::new();
     packet.write(&mut req_buffer)?;
-    socket.send_to(&req_buffer.buffer[0..req_buffer.pos], server)?;
+    socket.send_to(&req_buffer.buffer[0..req_buffer.pos()], server)?;
 
     let mut res_buffer = BytePacketBuffer::new();
     socket.recv_from(&mut res_buffer.buffer)?;
 
-    let res_packet = Packet::from_buffer(&mut res_buffer)?;
-    println!("{:#?}", res_packet.header);
+    Packet::from_buffer(&mut res_buffer)
+}
 
-    for q in res_packet.questions {
-        println!("{:#?}", q);
+fn handle_query(socket: &UdpSocket) -> Result<()> {
+    let mut req_buffer = BytePacketBuffer::new();
+    let (_, src) = socket.recv_from(&mut req_buffer.buffer)?;
+
+    let mut request = Packet::from_buffer(&mut req_buffer)?;
+
+    let mut packet = Packet::new();
+    packet.header.id = request.header.id;
+    packet.header.recursion_desired = true;
+    packet.header.recursion_available = true;
+    packet.header.responce = true;
+
+    if let Some(question) = request.questions.pop() {
+        println!("rcvd query : {:?}", question);
+
+        if let Ok(result) = lookup(&question.name, question.qtype) {
+            packet.questions.push(question);
+            packet.header.responce_code = result.header.responce_code;
+
+            for q in result.answers {
+                println!("{:#?}", q);
+            }
+            for q in result.authorities {
+                println!("{:#?}", q);
+            }
+            for q in result.resources {
+                println!("{:#?}", q);
+            }
+        } else {
+            packet.header.responce_code = enums::ResultCode::SERVFAIL;
+        }
+    } else {
+        packet.header.responce_code = enums::ResultCode::FORMERR;
     }
-    for q in res_packet.answers {
-        println!("{:#?}", q);
-    }
-    for q in res_packet.authorities {
-        println!("{:#?}", q);
-    }
-    for q in res_packet.resources {
-        println!("{:#?}", q);
-    }
+
+    let mut res_buffer = BytePacketBuffer::new();
+    packet.write(&mut res_buffer)?;
+
+    let len = res_buffer.pos();
+    let data = res_buffer.get_range(0, len)?;
+
+    socket.send_to(data, src)?;
 
     Ok(())
 }
