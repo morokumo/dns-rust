@@ -1,9 +1,16 @@
-use crate::packet::{BytePacketBuffer, Packet, QueryType, Question};
 use std::{fs::File, io::Read, net::UdpSocket};
+
+use crate::{buffer::BytePacketBuffer, enums::QueryType, packet::Packet, question::Question};
 mod packet;
+mod buffer;
+mod header;
+mod enums;
+mod question;
 
 type Error = Box<dyn std::error::Error>;
 type Result<T> = std::result::Result<T, Error>;
+
+const PACKET_BUFFER_SIZE: usize = 512;
 
 fn main() -> Result<()> {
     println!("Hello, world!");
