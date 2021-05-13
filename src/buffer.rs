@@ -2,6 +2,8 @@ use crate::PACKET_BUFFER_SIZE;
 
 type Error = Box<dyn std::error::Error>;
 type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug)]
 pub struct BytePacketBuffer {
     pub buffer: [u8; PACKET_BUFFER_SIZE],
     pub pos: usize,
@@ -63,7 +65,7 @@ impl BytePacketBuffer {
     }
     pub fn write_u16(&mut self, val: u16) -> Result<()> {
         self.write((val >> 8) as u8)?;
-        self.write(((val >> 0) & 0xFF) as u8)?;
+        self.write((val & 0xFF) as u8)?;
         Ok(())
     }
     pub fn write_u32(&mut self, val: u32) -> Result<()> {
